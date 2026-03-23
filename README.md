@@ -68,7 +68,7 @@ EduBot
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/EduBot.git
+git clone https://github.com/10and01/EduBot.git
 cd EduBot
 ```
 
@@ -232,6 +232,20 @@ workspace/
 ├── sessions/      # Conversation history
 └── skills/        # Custom agent skills
 ```
+---
+
+## 🌟 Quick Tips
+
+### For Educators
+1. **Upload course materials** → **Ask questions** → AI cites relevant content
+2. **Generate lesson plans** → **Convert to video prompts** → Use with video AI tools
+3. **Extend with custom skills** → Add domain-specific tools for your subject area
+
+### For Developers
+- Backend: FastAPI + Pydantic (async-first Python)
+- Frontend: Next.js 14 + Ant Design (React Server Components)
+- Vector Database: Chroma for semantic search (RAG)
+- Extensibility: MCP servers, custom skills, multiple LLM providers
 
 ---
 
