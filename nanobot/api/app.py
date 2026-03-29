@@ -18,7 +18,7 @@ import uvicorn
 import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from nanobot.agent.loop import AgentLoop
@@ -2115,6 +2115,100 @@ async def chat_send(req: ChatRequest) -> ChatResponse:
     chat_delta = _chat_view_from_session(delta)
     trace = chat_delta[-1].get("traces", []) if chat_delta else []
     return ChatResponse(response=response, trace=trace)
+
+
+@app.post("/api/chat/send_stream")
+async def chat_send_stream(req: ChatRequest) -> StreamingResponse:
+    await runtime.ensure()
+    if not runtime.agent:
+        raise HTTPException(status_code=500, detail="agent not ready")
+
+    raw = (req.message or "").strip()
+    cmd = raw.lower()
+    if cmd.startswith("/video") or raw.startswith("/视频"):
+        out = await chat_send(req)
+
+        def _one() -> Any:
+            yield f"event: delta\ndata: {json.dumps({'content': out.response}, ensure_ascii=False)}\n\n"
+            yield f"event: final\ndata: {json.dumps({'trace': out.trace or []}, ensure_ascii=False)}\n\n"
+            yield "event: done\ndata: {}\n\n"
+
+        return StreamingResponse(_one(), media_type="text/event-stream")
+
+    session = runtime.agent.sessions.get_or_create(req.session_key)
+    before = len(session.messages)
+
+    q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def _work() -> None:
+        try:
+            streamed_chars = 0
+
+            async def _on_progress(content: str, *, tool_hint: bool = False) -> None:
+                await q.put({"event": "progress", "content": content, "tool_hint": tool_hint})
+
+            async def _on_token(delta: str) -> None:
+                nonlocal streamed_chars
+                if not delta:
+                    return
+                streamed_chars += len(delta)
+                await q.put({"event": "delta", "content": delta})
+
+            response = await runtime.agent.process_direct(
+                req.message,
+                session_key=req.session_key,
+                channel="web",
+                chat_id=req.session_key,
+                on_progress=_on_progress,
+                on_token=_on_token,
+            )
+
+            profile_key = _teacher_profile_key(req.session_key)
+            profile = _update_profile_from_message(profile_key, req.message)
+            session.metadata.setdefault("teacher_profile", profile)
+            runtime.agent.sessions.save(session)
+            _schedule_global_teacher_profile_refresh()
+
+            session2 = runtime.agent.sessions.get_or_create(req.session_key)
+            delta = session2.messages[before:]
+            chat_delta = _chat_view_from_session(delta)
+            trace = chat_delta[-1].get("traces", []) if chat_delta else []
+
+            text = response or ""
+            # Fallback for non-streaming providers.
+            if streamed_chars == 0 and text:
+                chunk_size = 12
+                for i in range(0, len(text), chunk_size):
+                    await q.put({"event": "delta", "content": text[i : i + chunk_size]})
+                    await asyncio.sleep(0.025)
+            await q.put({"event": "final", "trace": trace})
+        except Exception as exc:
+            await q.put({"event": "error", "message": str(exc)})
+        finally:
+            await q.put({"event": "done"})
+
+    task = asyncio.create_task(_work())
+
+    async def _stream() -> Any:
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                ev = str(item.pop("event", "message"))
+                yield f"event: {ev}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+                if ev == "done":
+                    break
+        finally:
+            if not task.done():
+                try:
+                    task.cancel()
+                except Exception:
+                    pass
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
 
 
 @app.get("/api/chat/history")

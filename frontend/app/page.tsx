@@ -52,7 +52,6 @@ import {
   listMcpServers,
   listSkills,
   readFile,
-  sendChat,
   updateTeacherProfile,
   updateMcpConfig,
   importDocument,
@@ -67,7 +66,7 @@ const { Paragraph, Text, Title } = Typography;
 
 type ChatMessage = { role: "user" | "assistant"; content: string };
 type ChatTrace = { kind: string; emoji: string; title: string; content: string };
-type UIChatMessage = ChatMessage & { traces?: ChatTrace[]; timestamp?: string };
+type UIChatMessage = ChatMessage & { traces?: ChatTrace[]; timestamp?: string; thinking?: Array<{ type: "text" | "tool"; content: string }> };
 type SkillItem = { name: string; path: string; source: string };
 type MCPItem = { name: string; type: string; url?: string; command?: string };
 type NavKey = "chat" | "lesson" | "config" | "skills" | "files" | "docs" | "videos";
@@ -309,23 +308,125 @@ export default function HomePage() {
   async function onSendChat() {
     const text = chatInput.trim();
     if (!text) return;
-    const next: UIChatMessage[] = [...messages, { role: "user", content: text }];
+    const next: UIChatMessage[] = [...messages, { role: "user", content: text }, { role: "assistant", content: "" }];
+    const assistantIndex = next.length - 1;
     setMessages(next);
     setChatInput("");
     setBusy(true);
     try {
-      const out = await sendChat(text, sessionKey);
-      setMessages([
-        ...next,
-        {
-          role: "assistant",
-          content: out.response || "",
-          traces: out.trace || [],
+      const resp = await fetch(`${API_BASE}/api/chat/send_stream`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
         },
-      ]);
+        body: JSON.stringify({ message: text, session_key: sessionKey }),
+      });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error(errText || `HTTP ${resp.status}`);
+      }
+      if (!resp.body) {
+        throw new Error("浏览器不支持流式响应（ReadableStream 不可用）");
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buf = "";
+
+      const applyDelta = (delta: string) => {
+        if (!delta) return;
+        setMessages((prev) => {
+          if (assistantIndex >= prev.length) return prev;
+          const cur = prev[assistantIndex];
+          const nextArr = [...prev];
+          nextArr[assistantIndex] = { ...cur, content: String(cur.content || "") + delta };
+          return nextArr;
+        });
+      };
+
+      const applyTrace = (trace: Array<Record<string, unknown>>) => {
+        setMessages((prev) => {
+          if (assistantIndex >= prev.length) return prev;
+          const cur = prev[assistantIndex];
+          const nextArr = [...prev];
+          nextArr[assistantIndex] = { ...cur, traces: trace as any };
+          return nextArr;
+        });
+      };
+
+      const applyThinking = (content: string, toolHint: boolean) => {
+        setMessages((prev) => {
+          if (assistantIndex >= prev.length) return prev;
+          const cur = prev[assistantIndex];
+          const nextArr = [...prev];
+          const thinkingType = toolHint ? "tool" : "text";
+          nextArr[assistantIndex] = {
+            ...cur,
+            thinking: [...(cur.thinking || []), { type: thinkingType, content }],
+          };
+          return nextArr;
+        });
+      };
+
+      let done = false;
+      while (!done) {
+        const { value, done: streamDone } = await reader.read();
+        if (streamDone) break;
+        buf += decoder.decode(value, { stream: true });
+
+        let splitAt = buf.indexOf("\n\n");
+        while (splitAt >= 0) {
+          const frame = buf.slice(0, splitAt);
+          buf = buf.slice(splitAt + 2);
+
+          const lines = frame
+            .split("\n")
+            .map((l) => l.trimEnd())
+            .filter((l) => Boolean(l) && !l.startsWith(":"));
+          let ev = "message";
+          let data = "";
+          for (const line of lines) {
+            if (line.startsWith("event:")) ev = line.slice("event:".length).trim();
+            else if (line.startsWith("data:")) data += line.slice("data:".length).trim();
+          }
+          if (data) {
+            let payload: any = {};
+            try {
+              payload = JSON.parse(data);
+            } catch {
+              payload = { content: data };
+            }
+            if (ev === "delta") applyDelta(String(payload.content || ""));
+            else if (ev === "progress") {
+              applyThinking(String(payload.content || ""), !!payload.tool_hint);
+            } else if (ev === "final") {
+              if (Array.isArray(payload.trace)) applyTrace(payload.trace);
+            } else if (ev === "error") {
+              throw new Error(String(payload.message || "stream error"));
+            } else if (ev === "done") {
+              done = true;
+              try {
+                await reader.cancel();
+              } catch {
+              }
+              break;
+            }
+          }
+
+          splitAt = buf.indexOf("\n\n");
+        }
+      }
     } catch (err) {
       void message.error(String(err));
-      setMessages([...next, { role: "assistant", content: "⚠️ " + String(err) }]);
+      setMessages((prev) => {
+        const nextArr = [...prev];
+        if (assistantIndex < nextArr.length) {
+          nextArr[assistantIndex] = { role: "assistant", content: "⚠️ " + String(err) };
+          return nextArr;
+        }
+        return [...next, { role: "assistant", content: "⚠️ " + String(err) }];
+      });
     } finally {
       setBusy(false);
     }
@@ -1067,6 +1168,18 @@ export default function HomePage() {
                                   引用
                                 </Button>
                               </Tooltip>
+                            </div>
+                          )}
+                          {!!msg.thinking?.length && (
+                            <div className="thinking-panel" style={{ marginBottom: 12, paddingLeft: 8, borderLeft: "3px solid #d9d9d9" }}>
+                              {msg.thinking.map((th, thIdx) => (
+                                <div key={`${idx}-thinking-${thIdx}`} style={{ marginBottom: 8, fontSize: 12, color: "#666" }}>
+                                  <span style={{ marginRight: 6 }}>
+                                    {th.type === "tool" ? "⚙️" : "💭"}
+                                  </span>
+                                  <span style={{ fontStyle: "italic" }}>{th.content}</span>
+                                </div>
+                              ))}
                             </div>
                           )}
                           {!!msg.content && (
