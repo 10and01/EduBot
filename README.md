@@ -26,18 +26,17 @@
 
 ---
 
-## � Demo
+##  Demo
 
+GitHub 的 `README.md` 不会直接渲染 `iframe`，所以这里用“封面图 + 点击跳转视频”的方式展示：
 
-<!-- 方式 2：YouTube / Bilibili 封面图点击跳转（取消注释并替换 ID） -->
-<!-- [![EduBot 演示视频](https://i1.hdslb.com/bfs/archive/YOUR_COVER.jpg)](https://www.bilibili.com/video/BV_YOUR_ID) -->
+[![EduBot Demo](https://i2.hdslb.com/bfs/archive/55c65d5a8ec3f65532c8d2368cdac8c855dac5da.jpg)](https://www.bilibili.com/video/BV1gqDvBkExm/)
 
-
-> 📹 演示视频即将上线，敬请期待。
+> 如果你是在本地 Markdown 预览器或自己的网页里展示，才可以继续用 `iframe`。
 
 ---
 
-## �🏗️ Architecture
+## 🏗️ Architecture
 
 ```
 EduBot
