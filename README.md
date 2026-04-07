@@ -1,4 +1,5 @@
 <div align="center">
+  <img src="EduBot_logo.jpg" alt="EduBot Logo" width="180">
   <h1>🎓 EduBot — AI-Powered Education Assistant</h1>
   <p>An intelligent teaching assistant built on <a href="https://github.com/HKUDS/nanobot">nanobot</a> that helps educators design lesson plans, manage course materials, and interact with students via a modern web interface.</p>
   <p>
@@ -28,11 +29,11 @@
 
 ##  Demo
 
-GitHub 的 `README.md` 不会直接渲染 `iframe`，所以这里用“封面图 + 点击跳转视频”的方式展示：
+
 
 [![EduBot Demo](https://i2.hdslb.com/bfs/archive/55c65d5a8ec3f65532c8d2368cdac8c855dac5da.jpg)](https://www.bilibili.com/video/BV1gqDvBkExm/)
 
-> 如果你是在本地 Markdown 预览器或自己的网页里展示，才可以继续用 `iframe`。
+
 
 ---
 
