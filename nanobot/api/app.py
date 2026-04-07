@@ -1069,7 +1069,7 @@ async def _run_storyboard_video_queue(storyboard_id: str, req_payload: dict[str,
         q = storyboard.get("video_queue", {})
         if isinstance(q, dict):
             q["status"] = "failed"
-            q["message"] = "agent not ready"
+            q["message"] = "智能体未就绪"
             q["finished_at"] = _now_iso()
             storyboard["video_queue"] = q
             _save_storyboard(storyboard_id, storyboard)
@@ -1527,6 +1527,117 @@ def _extract_lesson_from_chat(messages: list[dict[str, Any]]) -> str | None:
     return None
 
 
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
+def _safe_file_stem(text: str) -> str:
+    t = re.sub(r"\s+", "_", (text or "").strip())
+    t = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff_.-]", "_", t)
+    t = re.sub(r"_+", "_", t).strip("._-")
+    return t[:80] if t else "untitled"
+
+
+def _save_lesson_plan_markdown(
+    *,
+    workspace_base: Path,
+    subject: str,
+    grade: str,
+    topic: str,
+    duration_minutes: int,
+    markdown: str,
+) -> str:
+    folder = (workspace_base / "documents" / "lesson_plans").resolve()
+    try:
+        folder.relative_to(workspace_base)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail="工作区路径异常") from exc
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stem = _safe_file_stem(f"{subject}_{grade}_{topic}_{duration_minutes}分钟_{stamp}")
+    rel = Path("documents") / "lesson_plans" / f"{stem}.md"
+    out = (workspace_base / rel).resolve()
+    out.write_text(markdown or "", encoding="utf-8")
+    return str(rel).replace("\\", "/")
+
+
+
+def _maybe_parse_lesson_request(text: str, session_key: str) -> dict[str, Any] | None:
+    raw = (text or "").strip()
+    if not raw or "教案" not in raw:
+        return None
+
+    m_dur = re.search(r"(\d{1,3})\s*分钟", raw)
+    if not m_dur:
+        return None
+    duration = int(m_dur.group(1))
+    if duration <= 0 or duration > 300:
+        return None
+
+    subject_candidates = ("语文", "数学", "英语", "物理", "化学", "生物")
+    subject = next((s for s in subject_candidates if s in raw), "")
+
+    m_grade = re.search(r"(\d{1,2}\s*年级)", raw)
+    grade = (m_grade.group(1).replace(" ", "") if m_grade else "")
+    if not grade:
+        m_stage = re.search(r"(小学|初中|高中|大学|幼儿园)", raw)
+        grade = (m_stage.group(1) if m_stage else "")
+    if not grade:
+        m_short = re.search(r"(高一|高二|高三|初一|初二|初三)", raw)
+        grade = (m_short.group(1) if m_short else "")
+    if not grade:
+        m_grade_zh = re.search(r"(一年级|二年级|三年级|四年级|五年级|六年级|七年级|八年级|九年级)", raw)
+        grade = (m_grade_zh.group(1) if m_grade_zh else "")
+
+    topic = ""
+    m_book = re.search(r"《([^》]{1,40})》", raw)
+    if m_book:
+        topic = m_book.group(1).strip()
+    if not topic and "兰亭集序" in raw:
+        topic = "兰亭集序"
+    if not topic:
+        m_about = re.search(r"关于([^，。；\n]{2,60})", raw)
+        if m_about:
+            topic = m_about.group(1).strip().strip("《》")
+    if not topic:
+        m_topic = re.search(r"(?:课题|主题)[:：]\s*([^，。；\n]{2,60})", raw)
+        if m_topic:
+            topic = m_topic.group(1).strip().strip("《》")
+
+    profile = _get_teacher_profile(session_key)
+    if not subject:
+        subject = str(profile.get("subject", "")).strip()
+    if not grade:
+        grade = str(profile.get("grade_level", "")).strip()
+
+    if topic == "兰亭集序":
+        if not subject:
+            subject = "语文"
+        if not grade:
+            grade = "高中"
+
+    if not subject or not grade or not topic:
+        return None
+
+    return {
+        "subject": subject,
+        "grade": grade,
+        "topic": topic,
+        "duration_minutes": duration,
+        "detail_level": 3,
+        "needs_quiz": True,
+        "needs_rubric": True,
+        "needs_differentiation": True,
+        "include_handout": True,
+        "include_answer_key": True,
+        "language": "zh",
+        "output_format": "markdown",
+    }
+
+
 def _clean_url(s: str) -> str:
     t = (s or "").strip()
     if t.startswith("`") and t.endswith("`") and len(t) >= 2:
@@ -1938,7 +2049,7 @@ async def upload_file(file: UploadFile = File(...), target_dir: str = "documents
 async def chat_send(req: ChatRequest) -> ChatResponse:
     await runtime.ensure()
     if not runtime.agent:
-        raise HTTPException(status_code=500, detail="agent not ready")
+        raise HTTPException(status_code=500, detail="智能体未就绪")
 
     session = runtime.agent.sessions.get_or_create(req.session_key)
     raw = (req.message or "").strip()
@@ -2095,6 +2206,37 @@ async def chat_send(req: ChatRequest) -> ChatResponse:
         trace = chat_delta[-1].get("traces", []) if chat_delta else []
         return ChatResponse(response=reply, trace=trace)
 
+    lesson_params = _maybe_parse_lesson_request(req.message or "", req.session_key)
+    if lesson_params and runtime.agent.tools.has("lesson_plan_generate"):
+        before = len(session.messages)
+        _append_session_message(session, "user", req.message or "")
+        reply = await runtime.agent.tools.execute("lesson_plan_generate", lesson_params)
+
+        cfg = runtime.config
+        assert cfg is not None
+        saved_path = _save_lesson_plan_markdown(
+            workspace_base=cfg.workspace_path.resolve(),
+            subject=str(lesson_params.get("subject", "")),
+            grade=str(lesson_params.get("grade", "")),
+            topic=str(lesson_params.get("topic", "")),
+            duration_minutes=int(lesson_params.get("duration_minutes", 0) or 0),
+            markdown=reply,
+        )
+        reply = f"{reply}\n\n---\n\n已保存到：{saved_path}\n你可以在「本地文件」里打开该文件，或直接复制路径使用。"
+        _append_session_message(session, "assistant", reply)
+
+        profile_key = _teacher_profile_key(req.session_key)
+        profile = _update_profile_from_message(profile_key, req.message)
+        session.metadata.setdefault("teacher_profile", profile)
+        runtime.agent.sessions.save(session)
+        _schedule_global_teacher_profile_refresh()
+
+        session = runtime.agent.sessions.get_or_create(req.session_key)
+        delta = session.messages[before:]
+        chat_delta = _chat_view_from_session(delta)
+        trace = chat_delta[-1].get("traces", []) if chat_delta else []
+        return ChatResponse(response=reply, trace=trace)
+
     before = len(session.messages)
 
     response = await runtime.agent.process_direct(
@@ -2121,7 +2263,7 @@ async def chat_send(req: ChatRequest) -> ChatResponse:
 async def chat_send_stream(req: ChatRequest) -> StreamingResponse:
     await runtime.ensure()
     if not runtime.agent:
-        raise HTTPException(status_code=500, detail="agent not ready")
+        raise HTTPException(status_code=500, detail="智能体未就绪")
 
     raw = (req.message or "").strip()
     cmd = raw.lower()
@@ -2133,18 +2275,83 @@ async def chat_send_stream(req: ChatRequest) -> StreamingResponse:
             yield f"event: final\ndata: {json.dumps({'trace': out.trace or []}, ensure_ascii=False)}\n\n"
             yield "event: done\ndata: {}\n\n"
 
-        return StreamingResponse(_one(), media_type="text/event-stream")
+        return StreamingResponse(_one(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+    lesson_params = _maybe_parse_lesson_request(req.message or "", req.session_key)
+    if lesson_params and runtime.agent.tools.has("lesson_plan_generate"):
+        session = runtime.agent.sessions.get_or_create(req.session_key)
+        before = len(session.messages)
+        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        q.put_nowait({"event": "progress", "content": "已收到请求，正在准备生成教案…", "tool_hint": False})
+
+        async def _work_lesson() -> None:
+            try:
+                await q.put({"event": "progress", "content": "正在生成详细教案（最高详细度）…", "tool_hint": False})
+                _append_session_message(session, "user", req.message or "")
+                reply = await runtime.agent.tools.execute("lesson_plan_generate", lesson_params)
+
+                cfg = runtime.config
+                assert cfg is not None
+                saved_path = _save_lesson_plan_markdown(
+                    workspace_base=cfg.workspace_path.resolve(),
+                    subject=str(lesson_params.get("subject", "")),
+                    grade=str(lesson_params.get("grade", "")),
+                    topic=str(lesson_params.get("topic", "")),
+                    duration_minutes=int(lesson_params.get("duration_minutes", 0) or 0),
+                    markdown=reply,
+                )
+                reply = f"{reply}\n\n---\n\n已保存到：{saved_path}\n你可以在「本地文件」里打开该文件，或直接复制路径使用。"
+
+                _append_session_message(session, "assistant", reply)
+                runtime.agent.sessions.save(session)
+
+                chunk_size = 12
+                for i in range(0, len(reply), chunk_size):
+                    await q.put({"event": "delta", "content": reply[i : i + chunk_size]})
+                    await asyncio.sleep(0.02)
+                await q.put({"event": "final", "trace": []})
+            except Exception as exc:
+                await q.put({"event": "error", "message": str(exc)})
+            finally:
+                await q.put({"event": "done"})
+
+        task = asyncio.create_task(_work_lesson())
+
+        async def _stream_lesson() -> Any:
+            try:
+                while True:
+                    try:
+                        item = await asyncio.wait_for(q.get(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        yield ": keep-alive\n\n"
+                        continue
+                    ev = str(item.pop("event", "message"))
+                    yield f"event: {ev}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+                    if ev == "done":
+                        break
+            finally:
+                if not task.done():
+                    try:
+                        task.cancel()
+                    except Exception:
+                        pass
+
+        return StreamingResponse(_stream_lesson(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
     session = runtime.agent.sessions.get_or_create(req.session_key)
     before = len(session.messages)
 
     q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    q.put_nowait({"event": "progress", "content": "已收到请求，正在准备响应…", "tool_hint": False})
 
     async def _work() -> None:
         try:
             streamed_chars = 0
+            first_activity = asyncio.Event()
+            ticker_task: asyncio.Task[None] | None = None
 
             async def _on_progress(content: str, *, tool_hint: bool = False) -> None:
+                first_activity.set()
                 await q.put({"event": "progress", "content": content, "tool_hint": tool_hint})
 
             async def _on_token(delta: str) -> None:
@@ -2152,7 +2359,27 @@ async def chat_send_stream(req: ChatRequest) -> StreamingResponse:
                 if not delta:
                     return
                 streamed_chars += len(delta)
+                first_activity.set()
                 await q.put({"event": "delta", "content": delta})
+
+            async def _ticker() -> None:
+                steps = [
+                    "正在理解你的需求…",
+                    "正在组织教学目标与课堂结构…",
+                    "正在生成可直接落地的课堂流程与活动…",
+                    "正在整理练习、评价与作业…",
+                ]
+                for s in steps:
+                    if first_activity.is_set():
+                        break
+                    await q.put({"event": "progress", "content": s, "tool_hint": False})
+                    try:
+                        await asyncio.wait_for(first_activity.wait(), timeout=1.2)
+                        break
+                    except asyncio.TimeoutError:
+                        continue
+
+            ticker_task = asyncio.create_task(_ticker())
 
             response = await runtime.agent.process_direct(
                 req.message,
@@ -2185,6 +2412,11 @@ async def chat_send_stream(req: ChatRequest) -> StreamingResponse:
         except Exception as exc:
             await q.put({"event": "error", "message": str(exc)})
         finally:
+            if ticker_task and not ticker_task.done():
+                try:
+                    ticker_task.cancel()
+                except Exception:
+                    pass
             await q.put({"event": "done"})
 
     task = asyncio.create_task(_work())
@@ -2208,14 +2440,14 @@ async def chat_send_stream(req: ChatRequest) -> StreamingResponse:
                 except Exception:
                     pass
 
-    return StreamingResponse(_stream(), media_type="text/event-stream")
+    return StreamingResponse(_stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 @app.get("/api/chat/history")
 async def chat_history(session_key: str = "web:console") -> dict[str, Any]:
     await runtime.ensure()
     if not runtime.agent:
-        raise HTTPException(status_code=500, detail="agent not ready")
+        raise HTTPException(status_code=500, detail="智能体未就绪")
 
     session = runtime.agent.sessions.get_or_create(session_key)
     return {
@@ -2229,7 +2461,7 @@ async def chat_history(session_key: str = "web:console") -> dict[str, Any]:
 async def clear_chat(session_key: str = "web:console") -> dict[str, Any]:
     await runtime.ensure()
     if not runtime.agent:
-        raise HTTPException(status_code=500, detail="agent not ready")
+        raise HTTPException(status_code=500, detail="智能体未就绪")
     session = runtime.agent.sessions.get_or_create(session_key)
     session.clear()
     runtime.agent.sessions.save(session)
@@ -2278,7 +2510,7 @@ async def update_teacher_profile(req: TeacherProfileUpdateRequest) -> dict[str, 
 async def list_documents() -> dict[str, Any]:
     await runtime.ensure()
     if not runtime.agent:
-        raise HTTPException(status_code=500, detail="agent not ready")
+        raise HTTPException(status_code=500, detail="智能体未就绪")
     output = await runtime.agent.tools.execute("document_list", {})
     if isinstance(output, str) and output.startswith("Error"):
         raise HTTPException(status_code=400, detail=output)
@@ -2292,7 +2524,7 @@ async def list_documents() -> dict[str, Any]:
 async def import_document(req: DocumentImportRequest) -> dict[str, Any]:
     await runtime.ensure()
     if not runtime.agent:
-        raise HTTPException(status_code=500, detail="agent not ready")
+        raise HTTPException(status_code=500, detail="智能体未就绪")
 
     output = await runtime.agent.tools.execute(
         "document_import",
@@ -2314,7 +2546,7 @@ async def import_document(req: DocumentImportRequest) -> dict[str, Any]:
 async def import_document_dir(req: DocumentImportDirRequest) -> dict[str, Any]:
     await runtime.ensure()
     if not runtime.agent:
-        raise HTTPException(status_code=500, detail="agent not ready")
+        raise HTTPException(status_code=500, detail="智能体未就绪")
 
     output = await runtime.agent.tools.execute(
         "document_import_dir",
@@ -2393,7 +2625,7 @@ async def query_documents(req: DocumentQueryRequest) -> dict[str, Any]:
 async def generate_advanced_lesson(req: AdvancedLessonPlanRequest) -> dict[str, Any]:
     await runtime.ensure()
     if not runtime.agent:
-        raise HTTPException(status_code=500, detail="agent not ready")
+        raise HTTPException(status_code=500, detail="智能体未就绪")
 
     profile = _get_teacher_profile(req.session_key)
     persona_summary = _summarize_teacher_persona(profile)
@@ -2547,7 +2779,7 @@ async def create_activity_pack(req: ActivityPackCreateRequest) -> dict[str, Any]
 async def create_storyboard(req: StoryboardCreateRequest) -> dict[str, Any]:
     await runtime.ensure()
     if not runtime.agent:
-        raise HTTPException(status_code=500, detail="agent not ready")
+        raise HTTPException(status_code=500, detail="智能体未就绪")
     output = await runtime.agent.tools.execute(
         "lesson_to_video_prompt",
         {
@@ -2682,7 +2914,7 @@ async def generate_video_from_storyboard(
 ) -> dict[str, Any]:
     await runtime.ensure()
     if not runtime.agent:
-        raise HTTPException(status_code=500, detail="agent not ready")
+        raise HTTPException(status_code=500, detail="智能体未就绪")
     storyboard = _load_storyboard(storyboard_id)
     prompt = storyboard.get("video_prompt", {})
     segments = prompt.get("segments", []) if isinstance(prompt, dict) else []
@@ -2852,7 +3084,7 @@ async def download_file(path: str):
 async def query_media_task(task_id: str, wait: bool = False) -> dict[str, Any]:
     await runtime.ensure()
     if not runtime.agent:
-        raise HTTPException(status_code=500, detail="agent not ready")
+        raise HTTPException(status_code=500, detail="智能体未就绪")
     output = await runtime.agent.tools.execute(
         "media_query_task", {"task_id": task_id, "wait": wait}
     )

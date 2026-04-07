@@ -178,7 +178,7 @@ class AgentLoop:
                 default_language=lesson_cfg.language,
                 output_format=lesson_cfg.output_format,
                 include_citation=lesson_cfg.include_citation,
-                detail_level=lesson_cfg.detail_level,
+                detail_level=3,
                 llm_enhance=lesson_cfg.llm_enhance,
             ))
             self.tools.register(LessonToVideoPromptTool())
@@ -300,7 +300,7 @@ class AgentLoop:
                 # poison the context and cause permanent 400 loops (#1303).
                 if response.finish_reason == "error":
                     logger.error("LLM returned error: {}", (clean or "")[:200])
-                    final_content = clean or "Sorry, I encountered an error calling the AI model."
+                    final_content = clean or "调用模型时发生错误，请检查配置或稍后重试。"
                     break
                 messages = self.context.add_assistant_message(
                     messages, clean, reasoning_content=response.reasoning_content,
@@ -312,8 +312,8 @@ class AgentLoop:
         if final_content is None and iteration >= self.max_iterations:
             logger.warning("Max iterations ({}) reached", self.max_iterations)
             final_content = (
-                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
-                "without completing the task. You can try breaking the task into smaller steps."
+                f"已达到最大迭代次数（{self.max_iterations}），仍未完成任务。"
+                "建议将需求拆分为更小的步骤后重试。"
             )
 
         return final_content, tools_used, messages
@@ -351,7 +351,7 @@ class AgentLoop:
                 pass
         sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
         total = cancelled + sub_cancelled
-        content = f"Stopped {total} task(s)." if total else "No active task to stop."
+        content = f"已停止 {total} 个任务。" if total else "当前没有可停止的任务。"
         await self.bus.publish_outbound(OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=content,
         ))
@@ -359,7 +359,7 @@ class AgentLoop:
     async def _handle_restart(self, msg: InboundMessage) -> None:
         """Restart the process in-place via os.execv."""
         await self.bus.publish_outbound(OutboundMessage(
-            channel=msg.channel, chat_id=msg.chat_id, content="Restarting...",
+            channel=msg.channel, chat_id=msg.chat_id, content="正在重启…",
         ))
 
         async def _do_restart():
@@ -387,7 +387,7 @@ class AgentLoop:
                 logger.exception("Error processing message for session {}", msg.session_key)
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
-                    content="Sorry, I encountered an error.",
+                    content="处理消息时发生错误。",
                 ))
 
     async def close_mcp(self) -> None:
@@ -431,7 +431,7 @@ class AgentLoop:
             self.sessions.save(session)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
-                                  content=final_content or "Background task completed.")
+                                  content=final_content or "后台任务已完成。")
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
@@ -447,28 +447,28 @@ class AgentLoop:
                     return OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content="Memory archival failed, session not cleared. Please try again.",
+                        content="记忆归档失败，会话未清空，请重试。",
                     )
             except Exception:
                 logger.exception("/new archival failed for {}", session.key)
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content="Memory archival failed, session not cleared. Please try again.",
+                    content="记忆归档失败，会话未清空，请重试。",
                 )
 
             session.clear()
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="New session started.")
+                                  content="已开始新的会话。")
         if cmd == "/help":
             lines = [
-                "🐈 nanobot commands:",
-                "/new — Start a new conversation",
-                "/stop — Stop the current task",
-                "/restart — Restart the bot",
-                "/help — Show available commands",
+                "可用命令：",
+                "/new — 开始新会话",
+                "/stop — 停止当前任务",
+                "/restart — 重启服务",
+                "/help — 查看命令列表",
             ]
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
@@ -501,7 +501,7 @@ class AgentLoop:
         )
 
         if final_content is None:
-            final_content = "I've completed processing but have no response to give."
+            final_content = "处理完成，但没有可返回的内容。"
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
@@ -526,7 +526,7 @@ class AgentLoop:
             if role == "assistant" and not content and not entry.get("tool_calls"):
                 continue  # skip empty assistant messages — they poison session context
             if role == "tool" and isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
-                entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
+                entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n...（已截断）"
             elif role == "user":
                 if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
                     # Strip the runtime-context prefix, keep only the user text.

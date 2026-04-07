@@ -1449,6 +1449,8 @@ class LessonToVideoPromptTool(Tool):
 class MediaGenerateTool(Tool):
     """Call ARK (Volcano Engine) image/video generation APIs."""
 
+    _DEFAULT_VIDEO_MODEL = "doubao-seedance-1-0-pro-250528"
+
     def __init__(
         self,
         base_url: str = "",
@@ -1527,11 +1529,18 @@ class MediaGenerateTool(Tool):
         **kwargs: Any,
     ) -> str:
         if not self._base_url:
-            return "Error: media API is not configured. Set education.media.baseUrl and apiKey."
+            return "错误：未配置媒体生成接口。请在配置中设置 education.media.baseUrl 与 education.media.apiKey。"
         if not self._api_key:
-            return "Error: media API key missing. Set education.media.apiKey."
+            return "错误：缺少媒体生成接口密钥。请在配置中设置 education.media.apiKey。"
 
         target_model = model or (self._image_model if media_type == "image" else self._video_model)
+        target_model = str(target_model or "").strip()
+        if media_type == "video":
+            lower = target_model.lower()
+            if (not lower) or ("seed" in lower and "seedance" not in lower) or ("seedream" in lower):
+                target_model = self._video_model.strip() if str(self._video_model or "").strip() else self._DEFAULT_VIDEO_MODEL
+            if ("seed" in target_model.lower() and "seedance" not in target_model.lower()) or ("seedream" in target_model.lower()):
+                target_model = self._DEFAULT_VIDEO_MODEL
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -1550,7 +1559,7 @@ class MediaGenerateTool(Tool):
                     }
                     resp = await client.post(endpoint, headers=headers, json=payload)
                     if resp.status_code >= 400:
-                        return f"Error: ARK image API failed ({resp.status_code}): {resp.text[:500]}"
+                        return f"错误：图片生成接口调用失败（{resp.status_code}）：{resp.text[:500]}"
                     data = resp.json()
                     return json.dumps({"status": "ok", "media_type": "image", "result": data}, ensure_ascii=False)
                 else:
@@ -1564,18 +1573,41 @@ class MediaGenerateTool(Tool):
                     }
                     resp = await client.post(endpoint, headers=headers, json=payload)
                     if resp.status_code >= 400:
-                        return f"Error: ARK video task submit failed ({resp.status_code}): {resp.text[:500]}"
+                        retry_model = self._DEFAULT_VIDEO_MODEL
+                        should_retry = (
+                            resp.status_code == 400
+                            and retry_model
+                            and retry_model != target_model
+                            and ("does not support content generation" in resp.text.lower() or "\"param\":\"model\"" in resp.text)
+                        )
+                        if should_retry:
+                            payload["model"] = retry_model
+                            resp2 = await client.post(endpoint, headers=headers, json=payload)
+                            if resp2.status_code < 400:
+                                data = resp2.json()
+                                task_id = data.get("id") or data.get("task_id") or ""
+                                return json.dumps(
+                                    {
+                                        "status": "submitted",
+                                        "media_type": "video",
+                                        "task_id": task_id,
+                                        "message": f"已自动切换为可用的视频模型（{retry_model}）并重新提交任务。",
+                                        "raw": data,
+                                    },
+                                    ensure_ascii=False,
+                                )
+                        return f"错误：视频任务提交失败（{resp.status_code}）：{resp.text[:500]}"
                     data = resp.json()
                     task_id = data.get("id") or data.get("task_id") or ""
                     return json.dumps({
                         "status": "submitted",
                         "media_type": "video",
                         "task_id": task_id,
-                        "message": f"Video task submitted. Use media_query_task(task_id='{task_id}') to check status.",
+                        "message": f"视频任务已提交。可使用 media_query_task(task_id='{task_id}') 查询进度。",
                         "raw": data,
                     }, ensure_ascii=False)
         except Exception as exc:
-            return f"Error: media generation failed: {exc}"
+            return f"错误：媒体生成失败：{exc}"
 
 
 class MediaQueryTaskTool(Tool):

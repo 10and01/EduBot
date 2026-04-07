@@ -227,7 +227,7 @@ class LLMProvider(ABC):
                 raise
             except Exception as exc:
                 response = LLMResponse(
-                    content=f"Error calling LLM: {exc}",
+                    content=f"调用模型失败：{exc}",
                     finish_reason="error",
                 )
 

@@ -1,59 +1,59 @@
-# User Profile
+# 用户画像
 
-Information about the user to help personalize interactions.
+用于个性化教案与教学资源输出的用户信息。
 
-## Basic Information
+## 基本信息
 
-- **Name**: (teacher name)
-- **Timezone**: (your timezone, e.g., UTC+8)
-- **Language**: (preferred language)
+- **姓名**：（教师姓名）
+- **时区**：（例如：东八区）
+- **偏好语言**：（固定为：简体中文）
 
-## Preferences
+## 偏好设置
 
-### Communication Style
+### 沟通风格
 
-- [ ] Casual
-- [ ] Professional
-- [ ] Technical
+- [ ] 轻松
+- [ ] 专业
+- [ ] 偏技术
 
-### Response Length
+### 输出长度
 
-- [ ] Brief and concise
-- [ ] Detailed explanations
-- [ ] Adaptive based on question
+- [ ] 简洁
+- [ ] 尽量详细
+- [ ] 根据问题自适应
 
-### Technical Level
+### 教学经验
 
-- [ ] Beginner
-- [ ] Intermediate
-- [ ] Expert
+- [ ] 新手
+- [ ] 有经验
+- [ ] 资深
 
-## Work Context
+## 工作场景
 
-- **Primary Role**: Teacher / Instructional Designer
-- **Main Projects**: Lesson planning, classroom delivery, assessment design
-- **Tools You Use**: Courseware tools, LMS, video editing/generation tools
+- **角色**：教师 / 教学设计者
+- **常见任务**：备课、授课、作业与评价设计
+- **常用工具**：课件工具、教学平台、视频剪辑或生成工具
 
-## Teaching Profile
+## 教学画像
 
-- **Subject(s)**: (e.g., Math, Physics, English)
-- **Grade Level(s)**: (e.g., Grade 7, Grade 10)
-- **Typical Class Duration**: (e.g., 40/45/60 minutes)
-- **Teaching Style**: (e.g., lecture, inquiry, collaborative)
-- **Assessment Preference**: (e.g., formative, summative, mixed)
-- **Video Style Preference**: (e.g., realistic, animation, board-style)
-- **Special Classroom Constraints**: (e.g., limited devices, bilingual class)
+- **学科**：（例如：语文、数学、英语）
+- **年级/学段**：（例如：七年级、高一）
+- **常见课时**：（例如：40/45/60 分钟）
+- **教学风格**：（例如：讲授、探究、合作）
+- **评价偏好**：（例如：形成性、总结性、混合）
+- **视频风格偏好**：（例如：写实、动画、板书风）
+- **课堂约束**：（例如：设备有限、双语班）
 
-## Topics of Interest
+## 关注主题
 
-- Detailed lesson plans
-- Storyboard-based educational videos
-- Personalized teaching strategies
+- 详细教案
+- 分镜脚本式教学视频
+- 个性化教学策略
 
-## Special Instructions
+## 特别说明
 
-(Any specific instructions for how EduBot should generate lesson plans and videos)
+（补充你希望教案与视频输出遵循的固定要求）
 
 ---
 
-*Edit this file to customize EduBot behavior for your teaching needs.*
+编辑此文件可定制后续的教案与视频输出风格。 

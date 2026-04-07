@@ -375,7 +375,7 @@ class LessonPlanConfig(Base):
     output_format: Literal["markdown", "json"] = "markdown"
     language: Literal["zh", "en"] = "zh"
     include_citation: bool = True
-    detail_level: int = Field(default=2, ge=1, le=3)
+    detail_level: int = Field(default=3, ge=1, le=3)
     llm_enhance: bool = True
 
 

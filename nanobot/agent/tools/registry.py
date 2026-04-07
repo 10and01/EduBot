@@ -37,11 +37,11 @@ class ToolRegistry:
 
     async def execute(self, name: str, params: dict[str, Any]) -> str:
         """Execute a tool by name with given parameters."""
-        _HINT = "\n\n[Analyze the error above and try a different approach.]"
+        _HINT = "\n\n[请分析上面的错误并尝试不同的做法。]"
 
         tool = self._tools.get(name)
         if not tool:
-            return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
+            return f"错误：未找到工具“{name}”。可用工具：{', '.join(self.tool_names)}"
 
         try:
             # Attempt to cast parameters to match schema types
@@ -50,13 +50,13 @@ class ToolRegistry:
             # Validate parameters
             errors = tool.validate_params(params)
             if errors:
-                return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _HINT
+                return f"错误：工具“{name}”参数不合法：" + "；".join(errors) + _HINT
             result = await tool.execute(**params)
             if isinstance(result, str) and result.startswith("Error"):
                 return result + _HINT
             return result
         except Exception as e:
-            return f"Error executing {name}: {str(e)}" + _HINT
+            return f"错误：执行工具“{name}”失败：{str(e)}" + _HINT
 
     @property
     def tool_names(self) -> list[str]:

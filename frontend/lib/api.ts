@@ -11,7 +11,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`API ${path} failed: ${resp.status} ${text}`);
+    throw new Error(`接口请求失败：${path}（${resp.status}）${text ? " " + text : ""}`);
   }
   return resp.json() as Promise<T>;
 }
@@ -150,7 +150,7 @@ export async function uploadFile(file: File, targetDir = "documents/uploads") {
   );
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`uploadFile failed: ${resp.status} ${text}`);
+    throw new Error(`上传失败（${resp.status}）${text ? " " + text : ""}`);
   }
   return resp.json() as Promise<{ status: string; path: string; size: number }>;
 }

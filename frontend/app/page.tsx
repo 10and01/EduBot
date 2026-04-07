@@ -75,8 +75,8 @@ type ChatSession = { key: string; title: string; createdAt: number };
 const NAV_ITEMS: Array<{ key: NavKey; icon: string; label: string }> = [
   { key: "chat", icon: "💬", label: "对话" },
   { key: "lesson", icon: "🧠", label: "高级教案向导" },
-  { key: "config", icon: "⚙️", label: "API 配置" },
-  { key: "skills", icon: "🧩", label: "Skills / MCP" },
+  { key: "config", icon: "⚙️", label: "接口配置" },
+  { key: "skills", icon: "🧩", label: "技能与扩展" },
   { key: "files", icon: "📁", label: "本地文件" },
   { key: "docs", icon: "📚", label: "文档库" },
   { key: "videos", icon: "🎬", label: "视频制作" },
@@ -85,6 +85,8 @@ const NAV_ITEMS: Array<{ key: NavKey; icon: string; label: string }> = [
 const API_BASE = process.env.NEXT_PUBLIC_NANOBOT_API_BASE || "http://127.0.0.1:8000";
 const SESSION_STORAGE_KEY = "nanobot.sessions.v1";
 const CURRENT_SESSION_KEY = "nanobot.current_session_key.v1";
+const WELCOME_TEXT =
+  "欢迎使用教学助理。\n\n你可以把它当成“教案 + 课件素材 + 视频助手”，按下面顺序最省事：\n1) 先说清楚基本信息：学科/年级/课题/一节课多长时间（例如：五年级数学，分数乘法，40分钟）。\n2) 生成教案：去「高级教案向导」按表单填写，或直接在对话里说“帮我生成一份教案”。\n3) 生成视频：去「视频制作」点“一键生成视频”。如果你已有视频素材，把视频放到 documents/materials，会优先复用，不用重复生成。\n4) 预览与导出：任务完成后可直接预览；需要交付时，点“自动填充导出/从当前队列自动填充”，再导出 docx / pdf / md。\n\n你现在可以直接告诉我：学科、年级、课题和课堂时长，我会从教案开始带你走一遍。";
 
 export default function HomePage() {
   const [nav, setNav] = useState<NavKey>("chat");
@@ -172,6 +174,45 @@ export default function HomePage() {
   const [exportResult, setExportResult] = useState("{}");
   const [videoAutoRefreshStoryboardId, setVideoAutoRefreshStoryboardId] = useState("");
 
+  function welcomeMessages(): UIChatMessage[] {
+    return [{ role: "assistant", content: WELCOME_TEXT }];
+  }
+
+  function formatSkillSource(source: string) {
+    const s = String(source || "").toLowerCase();
+    if (s === "builtin") return "内置";
+    if (s === "workspace") return "工作区";
+    if (s === "user") return "用户";
+    if (s === "auto") return "自动";
+    return "未知";
+  }
+
+  function formatServerType(type: string) {
+    const t = String(type || "").toLowerCase();
+    if (t === "stdio" || t === "command") return "本地";
+    if (t === "sse" || t === "http" || t === "https" || t === "url") return "远程";
+    return "未知";
+  }
+
+  function isAbsolutePath(p: string) {
+    const s = String(p || "");
+    if (!s) return false;
+    if (s.startsWith("/") || s.startsWith("\\")) return true;
+    return /^[a-zA-Z]:[\\/]/.test(s);
+  }
+
+  function fullWorkspacePath(rel: string) {
+    const base = String(info?.workspace || "").trim();
+    const p = String(rel || "").trim();
+    if (!p) return "";
+    if (isAbsolutePath(p)) return p;
+    if (!base) return p;
+    const sep = base.includes("\\") ? "\\" : "/";
+    const b = base.endsWith("\\") || base.endsWith("/") ? base.slice(0, -1) : base;
+    const r = p.startsWith("\\") || p.startsWith("/") ? p.slice(1) : p;
+    return b + sep + r.replace(/[\\/]/g, sep);
+  }
+
   function tryParseJson<T>(text: string, fallback: T): T {
     try {
       return JSON.parse(text) as T;
@@ -252,7 +293,8 @@ export default function HomePage() {
         setConfigText(JSON.stringify(cfg, null, 2));
         setFiles(fl.entries || []);
         setDocsRaw(JSON.stringify(docs, null, 2));
-        setMessages(hist.messages || []);
+        const msgs = (hist.messages || []) as UIChatMessage[];
+        setMessages(msgs.length ? msgs : welcomeMessages());
       } catch (err) {
         void message.error(String(err));
       }
@@ -268,7 +310,8 @@ export default function HomePage() {
         } catch {
         }
         const hist = await getChatHistory(sessionKey);
-        setMessages(hist.messages || []);
+        const msgs = (hist.messages || []) as UIChatMessage[];
+        setMessages(msgs.length ? msgs : welcomeMessages());
       } catch {
         // keep current UI when history fetch fails
       }
@@ -314,6 +357,8 @@ export default function HomePage() {
     setChatInput("");
     setBusy(true);
     try {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 180_000);
       const resp = await fetch(`${API_BASE}/api/chat/send_stream`, {
         method: "POST",
         headers: {
@@ -321,7 +366,9 @@ export default function HomePage() {
           Accept: "text/event-stream",
         },
         body: JSON.stringify({ message: text, session_key: sessionKey }),
+        signal: controller.signal,
       });
+      window.clearTimeout(timeoutId);
       if (!resp.ok) {
         const errText = await resp.text();
         throw new Error(errText || `HTTP ${resp.status}`);
@@ -369,27 +416,46 @@ export default function HomePage() {
         });
       };
 
+      const findFrame = (input: string): { idx: number; len: number } | null => {
+        const lf = input.indexOf("\n\n");
+        const crlf = input.indexOf("\r\n\r\n");
+        if (lf < 0 && crlf < 0) return null;
+        if (lf >= 0 && crlf >= 0) return lf < crlf ? { idx: lf, len: 2 } : { idx: crlf, len: 4 };
+        return lf >= 0 ? { idx: lf, len: 2 } : { idx: crlf, len: 4 };
+      };
+
       let done = false;
       while (!done) {
         const { value, done: streamDone } = await reader.read();
         if (streamDone) break;
         buf += decoder.decode(value, { stream: true });
 
-        let splitAt = buf.indexOf("\n\n");
-        while (splitAt >= 0) {
-          const frame = buf.slice(0, splitAt);
-          buf = buf.slice(splitAt + 2);
+        let frameInfo = findFrame(buf);
+        while (frameInfo) {
+          const frame = buf.slice(0, frameInfo.idx);
+          buf = buf.slice(frameInfo.idx + frameInfo.len);
 
           const lines = frame
-            .split("\n")
+            .split(/\r?\n/)
             .map((l) => l.trimEnd())
             .filter((l) => Boolean(l) && !l.startsWith(":"));
           let ev = "message";
-          let data = "";
+          const dataParts: string[] = [];
           for (const line of lines) {
             if (line.startsWith("event:")) ev = line.slice("event:".length).trim();
-            else if (line.startsWith("data:")) data += line.slice("data:".length).trim();
+            else if (line.startsWith("data:")) dataParts.push(line.slice("data:".length).trimStart());
           }
+          const data = dataParts.join("\n");
+
+          if (ev === "done") {
+            done = true;
+            try {
+              await reader.cancel();
+            } catch {
+            }
+            break;
+          }
+
           if (data) {
             let payload: any = {};
             try {
@@ -402,23 +468,29 @@ export default function HomePage() {
               applyThinking(String(payload.content || ""), !!payload.tool_hint);
             } else if (ev === "final") {
               if (Array.isArray(payload.trace)) applyTrace(payload.trace);
-            } else if (ev === "error") {
-              throw new Error(String(payload.message || "stream error"));
-            } else if (ev === "done") {
               done = true;
               try {
                 await reader.cancel();
               } catch {
               }
               break;
+            } else if (ev === "error") {
+              throw new Error(String(payload.message || payload.error || "stream error"));
+            } else {
+              applyDelta(String(payload.content || data));
             }
           }
 
-          splitAt = buf.indexOf("\n\n");
+          frameInfo = findFrame(buf);
         }
       }
     } catch (err) {
-      void message.error(String(err));
+      const e = err as any;
+      if (e && (e.name === "AbortError" || String(e).includes("AbortError"))) {
+        void message.error("请求超时：请检查后端服务是否正常、网络是否可达，或稍后重试。");
+      } else {
+        void message.error(String(err));
+      }
       setMessages((prev) => {
         const nextArr = [...prev];
         if (assistantIndex < nextArr.length) {
@@ -433,12 +505,12 @@ export default function HomePage() {
   }
 
   async function onClearChat() {
-    const ok = window.confirm("确认清空当前会话历史吗？该操作会删除当前 Session 的已保存对话。");
+    const ok = window.confirm("确认清空当前会话历史吗？该操作会删除当前会话的已保存对话。");
     if (!ok) return;
     setBusy(true);
     try {
       await clearChatHistory(sessionKey);
-      setMessages([]);
+      setMessages(welcomeMessages());
       void message.success("当前会话已清空");
     } catch (err) {
       void message.error(String(err));
@@ -459,7 +531,7 @@ export default function HomePage() {
     setSessions(next);
     persistSessions(next, key);
     setSessionKey(key);
-    setMessages([]);
+    setMessages(welcomeMessages());
   }
 
   function onRenameSession() {
@@ -472,7 +544,7 @@ export default function HomePage() {
   }
 
   function onOpenSession() {
-    const key = window.prompt("请输入要打开的 Session Key：", "");
+    const key = window.prompt("请输入要打开的会话标识：", "");
     if (!key || !key.trim()) return;
     const cleaned = key.trim();
     ensureSessionInList(cleaned);
@@ -493,7 +565,7 @@ export default function HomePage() {
       setSessions(next);
       persistSessions(next, nextKey);
       setSessionKey(nextKey);
-      setMessages([]);
+      setMessages(welcomeMessages());
       void message.success("会话已删除");
     } catch (err) {
       void message.error(String(err));
@@ -838,8 +910,15 @@ export default function HomePage() {
     }
     setBusy(true);
     try {
+      const hasPastedLesson = storyboardLesson.trim().length >= 50;
       let sbId = storyboardId.trim();
       let sb: Record<string, unknown> = {};
+      if (sbId && hasPastedLesson) {
+        sbId = "";
+        setStoryboardId("");
+        void message.info("已检测到粘贴了新的教案内容，将重新生成分镜并启动视频队列。");
+      }
+
       if (!sbId) {
         const created = await createStoryboard({ lesson_plan: storyboardLesson });
         sb = (created.storyboard || {}) as Record<string, unknown>;
@@ -1119,7 +1198,7 @@ export default function HomePage() {
                     onChange={(v) => setSessionKey(v)}
                   />
                   <Tooltip title={sessionKey}>
-                    <Tag color="blue">Session</Tag>
+                    <Tag color="blue">会话</Tag>
                   </Tooltip>
                   <Button size="small" onClick={() => onCreateSession()}>
                     新建
@@ -1358,9 +1437,9 @@ export default function HomePage() {
                     <Text type="secondary">将自动执行：提示词合成 → 教案生成 → 规则校验</Text>
                   </Space>
                   <Space wrap>
-                    <Button onClick={() => void onQuickDownloadLesson("docx")} loading={busy}>下载 Word (docx)</Button>
-                    <Button onClick={() => void onQuickDownloadLesson("pdf")} loading={busy}>下载 PDF</Button>
-                    <Button onClick={() => void onQuickDownloadLesson("markdown")} loading={busy}>下载 Markdown</Button>
+                    <Button onClick={() => void onQuickDownloadLesson("docx")} loading={busy}>下载文档（docx）</Button>
+                    <Button onClick={() => void onQuickDownloadLesson("pdf")} loading={busy}>下载文档（pdf）</Button>
+                    <Button onClick={() => void onQuickDownloadLesson("markdown")} loading={busy}>下载文本（md）</Button>
                   </Space>
                   <Input.TextArea rows={12} value={lessonGeneratedMarkdown} readOnly placeholder="生成后的详细教案" />
                   <Input.TextArea rows={3} value={lessonPersonaSummary} readOnly placeholder="教师画像摘要（由对话自动提取）" />
@@ -1373,9 +1452,9 @@ export default function HomePage() {
 
           {nav === "config" && (
             <div className="page-section">
-              <Title level={4}>API 配置</Title>
+              <Title level={4}>接口配置</Title>
               <Paragraph type="secondary">
-                编辑并保存完整配置（含 API、Skills、MCP、Education）。
+                编辑并保存完整配置（含接口、技能与教学功能）。
               </Paragraph>
               <Input.TextArea
                 rows={20}
@@ -1395,10 +1474,10 @@ export default function HomePage() {
 
           {nav === "skills" && (
             <div className="page-section">
-              <Title level={4}>Skills / MCP</Title>
+              <Title level={4}>技能与扩展</Title>
               <Row gutter={[16, 16]}>
                 <Col xs={24} md={8}>
-                  <Card title="Skills" size="small">
+                  <Card title="技能" size="small">
                     <List
                       size="small"
                       dataSource={skills}
@@ -1409,7 +1488,7 @@ export default function HomePage() {
                         >
                           <Space direction="vertical" size={0}>
                             <Text strong>{item.name}</Text>
-                            <Text type="secondary">{item.source}</Text>
+                            <Text type="secondary">{formatSkillSource(item.source)}</Text>
                           </Space>
                         </List.Item>
                       )}
@@ -1417,17 +1496,17 @@ export default function HomePage() {
                   </Card>
                 </Col>
                 <Col xs={24} md={16}>
-                  <Card title="Skill 编辑器" size="small">
+                  <Card title="技能编辑器" size="small">
                     {!selectedSkill ? (
-                      <Paragraph type="secondary">从左侧选择一个 Skill 后可查看与修改。</Paragraph>
+                      <Paragraph type="secondary">从左侧选择一个技能后可查看与修改。</Paragraph>
                     ) : (
                       <Space direction="vertical" style={{ width: "100%" }}>
                         <Text>
-                          当前: <Text code>{selectedSkill.name}</Text> ({selectedSkill.source})
+                          当前：<Text code>{selectedSkill.name}</Text>（{formatSkillSource(selectedSkill.source)}）
                         </Text>
                         {selectedSkill.source === "builtin" && (
                           <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                            内置 Skill 修改后会自动写入 workspace 覆盖目录：<code>skills/{selectedSkill.name}/SKILL.md</code>
+                            内置技能修改后会自动写入覆盖目录：<code>skills/{selectedSkill.name}/SKILL.md</code>
                           </Paragraph>
                         )}
                         <Input.TextArea
@@ -1436,7 +1515,7 @@ export default function HomePage() {
                           onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setSkillContent(e.target.value)}
                         />
                         <Button type="primary" loading={busy} onClick={() => void onSaveSkill()}>
-                          保存 Skill
+                          保存技能
                         </Button>
                       </Space>
                     )}
@@ -1448,10 +1527,10 @@ export default function HomePage() {
 
               <Row gutter={[16, 16]}>
                 <Col xs={24}>
-                  <Card title="MCP Servers" size="small">
+                  <Card title="扩展服务" size="small">
                     {mcpServers.length === 0 ? (
                       <Paragraph type="secondary">
-                        当前没有 MCP 服务器。可在下方 JSON 中添加并保存。
+                        当前没有扩展服务。可在下方配置中添加并保存。
                       </Paragraph>
                     ) : (
                       <List
@@ -1461,7 +1540,7 @@ export default function HomePage() {
                           <List.Item>
                             <Space direction="vertical" size={0}>
                               <Text strong>{item.name}</Text>
-                              <Text type="secondary">{item.type}</Text>
+                              <Text type="secondary">{formatServerType(item.type)}</Text>
                               {!!item.url && <Text code>{item.url}</Text>}
                               {!!item.command && <Text code>{item.command}</Text>}
                             </Space>
@@ -1471,14 +1550,14 @@ export default function HomePage() {
                     )}
 
                     <Divider style={{ margin: "12px 0" }} />
-                    <Paragraph type="secondary">MCP JSON 配置（保存后会重载 API 配置）。</Paragraph>
+                    <Paragraph type="secondary">扩展服务配置（保存后会重载接口配置）。</Paragraph>
                     <Input.TextArea
                       rows={10}
                       value={mcpConfigText}
                       onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setMcpConfigText(e.target.value)}
                     />
                     <Button type="primary" style={{ marginTop: 8 }} onClick={() => void onSaveMcp()}>
-                      保存 MCP 配置
+                      保存扩展配置
                     </Button>
                   </Card>
                 </Col>
@@ -1492,7 +1571,7 @@ export default function HomePage() {
               <Row gutter={[16, 16]}>
                 <Col xs={24} md={8}>
                   <Card
-                    title="Workspace"
+                    title="工作区"
                     size="small"
                     extra={
                       <Button size="small" onClick={() => void refreshLists()}>
@@ -1653,27 +1732,71 @@ export default function HomePage() {
                           style={{ width: 260 }}
                         />
                         <Button onClick={() => void onReloadStoryboard()} loading={busy}>刷新进度</Button>
-                        <Button onClick={() => setNav("config")} loading={busy}>去配置 API</Button>
+                        <Button onClick={() => setNav("config")} loading={busy}>去配置接口</Button>
                       </Space>
-                      <Space wrap>
-                        {(() => {
-                          const q = tryParseJson<Record<string, unknown>>(videoTaskJson, {});
-                          const segments = Array.isArray(q.segments) ? (q.segments as Array<Record<string, unknown>>) : [];
-                          const status = String(q.status || "未开始");
-                          const doneCount = segments.filter((s) => ["done", "reused"].includes(String(s.status || ""))).length;
-                          const failCount = segments.filter((s) => ["failed", "needs_media_config"].includes(String(s.status || ""))).length;
-                          const total = segments.length || (q.total_segments ? Number(q.total_segments) : 0);
-                          const combined = String(q.combined_local_path || "");
-                          return (
-                            <>
+                      {(() => {
+                        const q = tryParseJson<Record<string, unknown>>(videoTaskJson, {});
+                        const segments = Array.isArray(q.segments) ? (q.segments as Array<Record<string, unknown>>) : [];
+                        const status = String(q.status || "未开始");
+                        const doneCount = segments.filter((s) => ["done", "reused"].includes(String(s.status || ""))).length;
+                        const failCount = segments.filter((s) => ["failed", "needs_media_config"].includes(String(s.status || ""))).length;
+                        const total = segments.length || (q.total_segments ? Number(q.total_segments) : 0);
+                        const combined = String(q.combined_local_path || "").trim();
+                        const queueMessage = String(q.message || "").trim();
+                        return (
+                          <Space direction="vertical" style={{ width: "100%" }}>
+                            <Space wrap>
                               <Text>队列状态：{status}</Text>
                               <Text>进度：{doneCount}/{total || "?"}</Text>
                               {failCount > 0 && <Text type="danger">异常：{failCount}</Text>}
-                              {!!combined && <Text>合成视频：{combined}</Text>}
-                            </>
-                          );
-                        })()}
-                      </Space>
+                            </Space>
+                            {!!combined && (
+                              <Space direction="vertical" size={0} style={{ width: "100%" }}>
+                                <Text>合成视频保存地址（相对路径）：{combined}</Text>
+                                {info?.workspace && <Text type="secondary">合成视频保存地址（完整路径）：{fullWorkspacePath(combined)}</Text>}
+                              </Space>
+                            )}
+                            {!!queueMessage && <Text type="warning">失败原因：{queueMessage}</Text>}
+                            {segments.length > 0 && (
+                              <List
+                                size="small"
+                                bordered
+                                dataSource={segments}
+                                renderItem={(s, idx) => {
+                                  const shotId = String(s.shot_id || s.shotId || "") || `shot-${idx + 1}`;
+                                  const stage = String(s.stage_tag || s.stageTag || "");
+                                  const st = String(s.status || "");
+                                  const src = String(s.source || "");
+                                  const localPath = String(s.local_path || s.localPath || "").trim();
+                                  const videoUrl = String(s.video_url || s.videoUrl || "").trim();
+                                  const err = String(s.error || "").trim();
+                                  const isFail = ["failed", "needs_media_config"].includes(st);
+                                  const isOk = ["done", "reused"].includes(st);
+                                  return (
+                                    <List.Item>
+                                      <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                                        <Space wrap>
+                                          <Text strong>{shotId}{stage ? `（${stage}）` : ""}</Text>
+                                          <Tag color={isFail ? "red" : isOk ? "green" : "blue"}>{st || "unknown"}</Tag>
+                                          {!!src && <Text type="secondary">来源：{src}</Text>}
+                                        </Space>
+                                        {localPath && (
+                                          <>
+                                            <Text>视频保存地址（相对路径）：{localPath}</Text>
+                                            {info?.workspace && <Text type="secondary">视频保存地址（完整路径）：{fullWorkspacePath(localPath)}</Text>}
+                                          </>
+                                        )}
+                                        {!localPath && videoUrl && <Text>视频地址：{videoUrl}</Text>}
+                                        {isFail && !!err && <Text type="danger">失败原因：{err}</Text>}
+                                      </Space>
+                                    </List.Item>
+                                  );
+                                }}
+                              />
+                            )}
+                          </Space>
+                        );
+                      })()}
                       <details>
                         <summary>查看详细信息（可选）</summary>
                         <Space direction="vertical" style={{ width: "100%", marginTop: 8 }}>
